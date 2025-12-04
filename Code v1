@@ -1,0 +1,547 @@
+import tkinter as tk
+from tkinter import ttk, messagebox, filedialog
+import sqlite3
+import json
+import csv
+import io
+import time
+import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+import threading
+import sys
+import numpy as np
+
+# --- IMAGE HANDLING (Pillow) ---
+from PIL import Image, ImageTk
+
+# --- MATPLOTLIB IMPORTS ---
+import matplotlib
+matplotlib.use("TkAgg")
+from matplotlib.figure import Figure
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
+
+# --- CONFIGURATION ---
+PUBCHEM_URL = "https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/monoisotopic_mass"
+STRUCTURE_URL = "https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/cid/{}/PNG?record_type=2d&image_size=300x300"
+
+HEADERS = {
+    'User-Agent': 'MALDI_Analyst_Pro/17.0 (contact: academic_research@example.com)',
+    'Accept': 'application/json'
+}
+
+ADDUCTS = {
+    "[M+H]+": 1.007276,
+    "[M+Na]+": 22.98977,
+    "[M+K]+": 38.96370,
+    "[M+NH4]+": 18.03437,
+    "Neutral (M)": 0.0
+}
+
+INSTRUMENTS = {
+    "MALDI MRT (High Res)": 0.005,
+    "MALDI-Cyclic IMS": 0.01,
+    "MALDI-Synapt G2/G2-Si": 0.02,
+    "Standard TOF (Low Res)": 0.1,
+    "Custom Value": None
+}
+
+CLASS_KEYWORDS = {
+    "Lipids (Gen)": ["lipid", "glycer", "sphingo", "ceramide", "ganglioside"],
+    "Phospholipids": ["phosphatidyl", "phospho", "pe(", "pc(", "pi(", "ps(", "pg(", "pa("],
+    "Diglycerides (DG)": ["diglyceride", "diacylglycerol", "diacyl"],
+    "Triglycerides (TG)": ["triglyceride", "triacylglycerol", "triacyl"],
+    "Fatty Acids": ["acid", "oate", "noic", "decenoic"],
+    "Sterols": ["sterol", "cholest", "stane", "sone"],
+    "Peptides": ["peptide", "bovine", "human", "protein", "insulin", "albumin"],
+    "Carbohydrates": ["ose", "glycan", "saccharide", "gluc"],
+    "Metabolites": ["amine", "ate", "ine", "one", "ol"],
+    "Drugs": ["fen", "vir", "ine", "ol", "mab", "ib", "tin"]
+}
+
+class MassSpecApp:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("MALDI PeakHunter")
+        self.root.geometry("1500x950")
+        
+        self.root.protocol("WM_DELETE_WINDOW", self.on_close)
+        self.is_running = True
+
+        self.init_db()
+        self.setup_network_session()
+        
+        # State Management
+        self.mzs_array = np.array([])
+        self.ints_array = np.array([])
+        self.active_labels = []
+        self.zoom_callback_id = None
+        self.latest_search_id = 0 # To prevent old slow searches from overwriting new ones
+        self.current_structure_image = None # Prevent garbage collection
+
+        # --- GUI LAYOUT ---
+        
+        # LEFT PANEL
+        self.pan_left = ttk.Frame(root)
+        self.pan_left.pack(side="left", fill="y", padx=5, pady=5)
+        
+        # RIGHT PANEL
+        self.pan_right = ttk.Frame(root)
+        self.pan_right.pack(side="right", fill="both", expand=True, padx=5, pady=5)
+
+        # 1. SETTINGS
+        self.frame_top = ttk.LabelFrame(self.pan_left, text="Settings")
+        self.frame_top.pack(fill="x", pady=5)
+        
+        ttk.Label(self.frame_top, text="Instrument:").pack(anchor="w", padx=5)
+        self.inst_var = tk.StringVar(value="MALDI MRT (High Res)")
+        self.cb_inst = ttk.Combobox(self.frame_top, textvariable=self.inst_var, values=list(INSTRUMENTS.keys()), state="readonly")
+        self.cb_inst.pack(fill="x", padx=5, pady=2)
+        self.cb_inst.bind("<<ComboboxSelected>>", self.apply_instrument_preset)
+
+        ttk.Label(self.frame_top, text="Tolerance:").pack(anchor="w", padx=5)
+        self.tolerance_var = tk.DoubleVar(value=0.005) 
+        self.entry_tol = ttk.Entry(self.frame_top, textvariable=self.tolerance_var)
+        self.entry_tol.pack(fill="x", padx=5, pady=2)
+        
+        self.tol_unit = tk.StringVar(value="Da")
+        ttk.Combobox(self.frame_top, textvariable=self.tol_unit, values=["Da", "ppm"], width=5).pack(fill="x", padx=5, pady=2)
+
+        ttk.Label(self.frame_top, text="Adduct:").pack(anchor="w", padx=5)
+        self.adduct_var = tk.StringVar(value="[M+H]+")
+        ttk.Combobox(self.frame_top, textvariable=self.adduct_var, values=list(ADDUCTS.keys())).pack(fill="x", padx=5, pady=2)
+
+        # 2. FILTERS
+        self.frame_filters = ttk.LabelFrame(self.pan_left, text="Result Filters")
+        self.frame_filters.pack(fill="x", pady=5)
+        
+        # PPM Limit
+        self.frame_ppm_limit = ttk.Frame(self.frame_filters)
+        self.frame_ppm_limit.pack(fill="x", padx=5, pady=5)
+        self.use_ppm_limit = tk.BooleanVar(value=False)
+        self.ppm_limit_val = tk.DoubleVar(value=5.0)
+        
+        ttk.Checkbutton(self.frame_ppm_limit, text="Max PPM Error:", variable=self.use_ppm_limit).pack(side="left")
+        ttk.Entry(self.frame_ppm_limit, textvariable=self.ppm_limit_val, width=5).pack(side="left", padx=5)
+        
+        ttk.Separator(self.frame_filters, orient='horizontal').pack(fill='x', pady=5)
+        
+        # Classes
+        self.class_vars = {}
+        for cls_name in CLASS_KEYWORDS:
+            var = tk.BooleanVar(value=False)
+            self.class_vars[cls_name] = var
+            ttk.Checkbutton(self.frame_filters, text=cls_name, variable=var).pack(anchor="w", padx=5)
+
+        # 3. INPUT
+        self.frame_input = ttk.LabelFrame(self.pan_left, text="Input Spectrum")
+        self.frame_input.pack(fill="both", expand=True, pady=5)
+        self.txt_input = tk.Text(self.frame_input, width=30, height=10)
+        self.txt_input.pack(fill="both", expand=True, padx=5, pady=5)
+        self.txt_input.insert("1.0", "Example:\n411.22046, 10000\n611.09, 50000\n760.585, 25000")
+        
+        # Buttons
+        ttk.Button(self.pan_left, text="Generate Plot", command=self.plot_spectrum).pack(fill="x", pady=5)
+        ttk.Button(self.pan_left, text="Search Local DB", command=self.search_local_db).pack(fill="x", pady=2)
+        ttk.Button(self.pan_left, text="Export Results (.csv)", command=self.export_csv).pack(fill="x", pady=2)
+
+        # 4. PLOT AREA (Top Right)
+        self.frame_plot = ttk.LabelFrame(self.pan_right, text="Interactive Mass Spectrum")
+        self.frame_plot.pack(side="top", fill="both", expand=True)
+        
+        self.fig = Figure(figsize=(5, 3), dpi=100)
+        self.ax = self.fig.add_subplot(111)
+        self.canvas = FigureCanvasTkAgg(self.fig, master=self.frame_plot)
+        self.canvas.draw()
+        self.canvas.get_tk_widget().pack(side="top", fill="both", expand=True)
+        self.toolbar = NavigationToolbar2Tk(self.canvas, self.frame_plot)
+        self.toolbar.update()
+        self.canvas.get_tk_widget().pack(side="top", fill="both", expand=True)
+        self.canvas.mpl_connect('pick_event', self.on_peak_click)
+
+        # 5. BOTTOM AREA (Split: Table Left, Image Right)
+        self.frame_bottom = ttk.Frame(self.pan_right)
+        self.frame_bottom.pack(side="bottom", fill="both", expand=True, pady=5)
+        
+        # 5a. Results Table
+        self.frame_table = ttk.Frame(self.frame_bottom)
+        self.frame_table.pack(side="left", fill="both", expand=True)
+        
+        # We include a HIDDEN column for CID
+        cols = ("Rank", "Source", "Name", "Formula", "Observed m/z", "Error", "ClassMatch", "CID")
+        self.tree = ttk.Treeview(self.frame_table, columns=cols, show='headings', height=8)
+        
+        # Configure columns
+        display_cols = ["Rank", "Source", "Name", "Formula", "Observed m/z", "Error", "ClassMatch"] # Hide CID
+        self.tree["displaycolumns"] = display_cols
+        
+        for col in display_cols:
+            self.tree.heading(col, text=col)
+            width = 50 if col == "Rank" else 80
+            if col == "Name": width = 250
+            if col == "Observed m/z": width = 100
+            self.tree.column(col, width=width, anchor="center" if col != "Name" else "w")
+            
+        # Add Scrollbar
+        self.tree_scroll = ttk.Scrollbar(self.frame_table, orient="vertical", command=self.tree.yview)
+        self.tree.configure(yscrollcommand=self.tree_scroll.set)
+        self.tree_scroll.pack(side="right", fill="y")
+        self.tree.pack(side="left", fill="both", expand=True)
+        
+        # Bind Selection Event for Image
+        self.tree.bind("<<TreeviewSelect>>", self.on_tree_select)
+
+        # 5b. Structure Viewer
+        self.frame_struct = ttk.LabelFrame(self.frame_bottom, text="Structure Preview", width=300)
+        self.frame_struct.pack(side="right", fill="y", padx=5)
+        self.frame_struct.pack_propagate(False) # Force width
+        
+        self.lbl_struct = tk.Label(self.frame_struct, text="Select a compound\nto view structure")
+        self.lbl_struct.pack(expand=True)
+
+        # Status Bar
+        self.status_var = tk.StringVar(value="Ready.")
+        tk.Label(root, textvariable=self.status_var, bd=1, relief=tk.SUNKEN, anchor=tk.W).pack(side=tk.BOTTOM, fill=tk.X)
+
+    # --- IMAGE PREVIEW LOGIC ---
+    def on_tree_select(self, event):
+        """Called when user clicks a row in the table."""
+        selected_items = self.tree.selection()
+        if not selected_items: return
+        
+        item = self.tree.item(selected_items[0])
+        values = item['values']
+        
+        # CID is the last value (hidden column)
+        # Note: Tkinter might treat values as string, we need to be careful with index
+        if len(values) >= 8:
+            cid = values[7]
+            source = values[1]
+            
+            if source == "PubChem" and cid != "N/A":
+                self.lbl_struct.config(text="Loading...", image="")
+                threading.Thread(target=self.fetch_structure_image, args=(cid,), daemon=True).start()
+            else:
+                self.lbl_struct.config(text="No structure available\n(Local/Unknown)", image="")
+
+    def fetch_structure_image(self, cid):
+        """Downloads PNG from PubChem in background."""
+        url = STRUCTURE_URL.format(cid)
+        try:
+            resp = self.session.get(url, timeout=10)
+            if resp.status_code == 200:
+                image_data = resp.content
+                image = Image.open(io.BytesIO(image_data))
+                photo = ImageTk.PhotoImage(image)
+                
+                def update_img():
+                    self.current_structure_image = photo # Keep reference
+                    self.lbl_struct.config(image=photo, text="")
+                
+                self.safe_gui_call(update_img)
+            else:
+                self.safe_gui_call(lambda: self.lbl_struct.config(text="Image not found", image=""))
+        except:
+            self.safe_gui_call(lambda: self.lbl_struct.config(text="Network Error", image=""))
+
+    # --- CSV EXPORT ---
+    def export_csv(self):
+        filename = filedialog.asksaveasfilename(defaultextension=".csv", filetypes=[("CSV Files", "*.csv")])
+        if not filename: return
+        
+        try:
+            with open(filename, mode='w', newline='', encoding='utf-8') as f:
+                writer = csv.writer(f)
+                # Header
+                writer.writerow(["Rank", "Source", "Name", "Formula", "Observed m/z", "Error (ppm)", "Class", "CID"])
+                # Rows
+                for child in self.tree.get_children():
+                    writer.writerow(self.tree.item(child)['values'])
+            messagebox.showinfo("Success", f"Data exported to {filename}")
+        except Exception as e:
+            messagebox.showerror("Export Error", str(e))
+
+    # --- PLOTTING LOGIC ---
+    def plot_spectrum(self):
+        peaks = self.parse_input_spectrum()
+        if not peaks:
+            self.safe_msg("Error", "No valid data to plot.", "error")
+            return
+
+        mzs = np.array([p[0] for p in peaks])
+        ints = np.array([p[1] for p in peaks])
+        self.mzs_array = mzs
+        self.ints_array = ints
+
+        self.ax.clear()
+        self.ax.set_xlabel("m/z")
+        self.ax.set_ylabel("Intensity")
+        
+        markerline, stemlines, baseline = self.ax.stem(mzs, ints)
+        try:
+            stemlines.set_picker(5)
+            markerline.set_picker(5)
+        except: pass
+        
+        if self.zoom_callback_id:
+            self.ax.callbacks.disconnect(self.zoom_callback_id)
+        self.zoom_callback_id = self.ax.callbacks.connect('xlim_changed', self.update_visible_labels)
+        
+        self.ax.set_ylim(0, max(ints) * 1.25)
+        self.ax.grid(True, linestyle='--', alpha=0.6)
+        self.update_visible_labels(self.ax)
+        self.canvas.draw_idle()
+
+    def update_visible_labels(self, ax):
+        x_min, x_max = ax.get_xlim()
+        visible_indices = np.where((self.mzs_array >= x_min) & (self.mzs_array <= x_max))[0]
+        if len(visible_indices) == 0: return
+
+        visible_ints = self.ints_array[visible_indices]
+        visible_mzs = self.mzs_array[visible_indices]
+        
+        top_n = 20
+        if len(visible_ints) > top_n:
+            sorted_args = np.argsort(visible_ints)[-top_n:]
+        else:
+            sorted_args = range(len(visible_ints))
+            
+        for label in self.active_labels: label.remove()
+        self.active_labels.clear()
+        
+        current_max_int = np.max(visible_ints) if len(visible_ints) > 0 else 100
+        
+        for idx in sorted_args:
+            mz = visible_mzs[idx]
+            intensity = visible_ints[idx]
+            t = self.ax.text(mz, intensity + (current_max_int * 0.02), f"{mz:.4f}", 
+                             rotation=90, ha='center', va='bottom', fontsize=9, clip_on=True)
+            self.active_labels.append(t)
+
+    def on_peak_click(self, event):
+        if event.ind is not None and len(event.ind) > 0:
+            ind = event.ind[0]
+            if ind < len(self.mzs_array):
+                selected_mz = self.mzs_array[ind]
+                # Reset Search
+                self.update_status(f"Selected m/z: {selected_mz:.4f}. Searching...")
+                self.start_search_thread(override_mz=selected_mz)
+
+    # --- SEARCH LOGIC (UNFROZEN) ---
+    def start_search_thread(self, override_mz=None):
+        # Generate a unique ID for this search request
+        self.latest_search_id = time.time()
+        # Pass the ID to the thread
+        threading.Thread(target=self.search_pubchem, args=(override_mz, self.latest_search_id), daemon=True).start()
+
+    def search_pubchem(self, override_mz, search_id):
+        target_mz = 0.0
+        if override_mz:
+            target_mz = override_mz
+        else:
+            peaks = self.parse_input_spectrum()
+            if not peaks:
+                self.safe_msg("Error", "No peaks.", "error")
+                return
+            target_mz = peaks[0][0]
+
+        adduct_mass = ADDUCTS[self.adduct_var.get()]
+        neutral_mass = target_mz - adduct_mass
+        min_mass, max_mass = self.get_tolerance_range(neutral_mass)
+
+        url = f"{PUBCHEM_URL}/range/{min_mass:.4f}/{max_mass:.4f}/JSON"
+        
+        # Check if new search started while we were setting up
+        if search_id != self.latest_search_id: return
+        self.update_status(f"Searching m/z {target_mz:.4f}...")
+
+        try:
+            resp = self.session.get(url, timeout=30)
+            
+            # Check ID again before processing heavy data
+            if search_id != self.latest_search_id: return
+
+            cids = []
+            if resp.status_code == 200:
+                data = resp.json()
+                if 'IdentifierList' in data: cids = data['IdentifierList'].get('CID', [])
+                elif 'PC_Compounds' in data:
+                    for c in data['PC_Compounds']:
+                        try: cids.append(c['id']['id']['cid'])
+                        except: pass
+            
+            if not cids:
+                self.safe_gui_call(lambda: self.lbl_struct.config(text="No Match", image=""))
+                self.update_status("No matches found.")
+                return
+
+            cids_to_analyze = cids[:40]
+            self.fetch_filter_rank(cids_to_analyze, neutral_mass, target_mz, search_id)
+
+        except Exception as e:
+            self.safe_msg("Error", str(e), "error")
+
+    def fetch_filter_rank(self, cids, theoretical_neutral, input_precursor, search_id):
+        cid_str = ",".join(map(str, cids))
+        url = f"https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/cid/{cid_str}/property/MolecularFormula,Title,MonoisotopicMass/JSON"
+        
+        try:
+            resp = self.session.get(url, timeout=30)
+            if search_id != self.latest_search_id: return
+
+            props = resp.json().get('PropertyTable', {}).get('Properties', [])
+            active_filters = [k for k, v in self.class_vars.items() if v.get()]
+            ranked_results = []
+            
+            for prop in props:
+                try:
+                    db_mass = float(prop.get('MonoisotopicMass', 0))
+                    cid = prop.get('CID', 'N/A')
+                    name = prop.get('Title', 'Unknown').lower()
+                    formula = prop.get('MolecularFormula', '?')
+                    diff = abs(db_mass - theoretical_neutral)
+                    ppm_error = (diff / db_mass) * 1e6
+                    
+                    is_match = False
+                    match_label = "No"
+                    if active_filters:
+                        for cls in active_filters:
+                            keywords = CLASS_KEYWORDS[cls]
+                            if any(k in name for k in keywords):
+                                is_match = True
+                                match_label = cls
+                                break
+                    else:
+                        is_match = True
+                        match_label = "-"
+
+                    if is_match:
+                        ranked_results.append({
+                            "name": prop.get('Title', 'Unknown'),
+                            "formula": formula,
+                            "error": ppm_error,
+                            "match_label": match_label,
+                            "cid": cid
+                        })
+                except: continue
+            
+            ranked_results.sort(key=lambda x: x['error'])
+            
+            # Apply PPM Limit
+            if self.use_ppm_limit.get():
+                limit = self.ppm_limit_val.get()
+                final_results = [r for r in ranked_results if r['error'] <= limit]
+            else:
+                final_results = ranked_results[:5]
+            
+            if search_id == self.latest_search_id:
+                self.update_tree_gui(final_results, input_precursor)
+                self.update_status(f"Showing {len(final_results)} matches for {input_precursor:.4f}")
+
+        except Exception as e:
+            self.safe_msg("Error", str(e), "error")
+
+    def update_tree_gui(self, results, input_precursor):
+        def _update():
+            for i in self.tree.get_children(): self.tree.delete(i)
+            for idx, item in enumerate(results):
+                err_str = f"{item['error']:.2f} ppm"
+                if item['error'] < 1.0: err_str = f"{item['error']:.4f} ppm"
+                
+                # Insert row (CID is hidden at end)
+                self.tree.insert("", "end", values=(
+                    idx + 1, "PubChem", item['name'], item['formula'],
+                    f"{input_precursor:.4f}", err_str, item['match_label'], item['cid']
+                ))
+            
+            # Clear image when new search loads
+            self.lbl_struct.config(text="Select a compound", image="")
+            
+        self.safe_gui_call(_update)
+
+    # --- BOILERPLATE HELPERS ---
+    def setup_network_session(self):
+        self.session = requests.Session()
+        retries = Retry(total=3, backoff_factor=1, status_forcelist=[500, 502, 503, 504])
+        adapter = HTTPAdapter(max_retries=retries)
+        self.session.mount('https://', adapter)
+        self.session.headers.update(HEADERS)
+
+    def on_close(self):
+        self.is_running = False
+        self.root.destroy()
+        sys.exit()
+
+    def safe_gui_call(self, callback, *args):
+        if not self.is_running: return
+        try: self.root.after(0, lambda: callback(*args))
+        except: pass
+
+    def safe_msg(self, title, msg, icon="info"):
+        def show():
+            if icon=="error": messagebox.showerror(title, msg)
+            elif icon=="warning": messagebox.showwarning(title, msg)
+            else: messagebox.showinfo(title, msg)
+        self.safe_gui_call(show)
+
+    def update_status(self, msg): self.safe_gui_call(self.status_var.set, msg)
+
+    def get_tolerance_range(self, mass):
+        tol = self.tolerance_var.get()
+        if self.tol_unit.get() == "ppm": delta = mass * (tol / 1e6)
+        else: delta = tol
+        return mass - delta, mass + delta
+
+    def parse_input_spectrum(self):
+        raw = self.txt_input.get("1.0", tk.END).strip()
+        peaks = []
+        for line in raw.split('\n'):
+            if "Example" in line: continue
+            clean = line.replace('\t', ',').replace(' ', ',')
+            parts = [p for p in clean.split(',') if p.strip()]
+            if len(parts) >= 1:
+                try: peaks.append((float(parts[0].strip()), float(parts[1].strip()) if len(parts)>1 else 0.0))
+                except ValueError: continue
+        peaks.sort(key=lambda x: x[1], reverse=True)
+        return peaks
+
+    def apply_instrument_preset(self, event=None):
+        val = INSTRUMENTS.get(self.inst_var.get())
+        if val: self.tolerance_var.set(val); self.tol_unit.set("Da")
+
+    def init_db(self):
+        self.conn = sqlite3.connect("my_ms_library.db", check_same_thread=False)
+        self.cursor = self.conn.cursor()
+        self.cursor.execute('''CREATE TABLE IF NOT EXISTS compounds (id INTEGER PRIMARY KEY, name TEXT, formula TEXT, precursor_mz REAL, collision_energy TEXT, peaks_json TEXT)''')
+        self.conn.commit()
+
+    def add_to_db_window(self):
+        peaks = self.parse_input_spectrum()
+        if not peaks: return
+        top = tk.Toplevel(self.root); top.title("Add to Library"); top.geometry("300x250")
+        tk.Label(top, text="Name:").pack(); name_e = tk.Entry(top); name_e.pack()
+        tk.Label(top, text="Formula:").pack(); form_e = tk.Entry(top); form_e.pack()
+        tk.Label(top, text="CE:").pack(); ce_e = tk.Entry(top); ce_e.pack()
+        def save():
+            if name_e.get():
+                self.cursor.execute("INSERT INTO compounds (name, formula, precursor_mz, collision_energy, peaks_json) VALUES (?,?,?,?,?)",
+                (name_e.get(), form_e.get(), peaks[0][0], ce_e.get(), json.dumps(peaks)))
+                self.conn.commit(); top.destroy(); messagebox.showinfo("Saved", "Saved!")
+        tk.Button(top, text="Save", command=save).pack(pady=10)
+
+    def search_local_db(self):
+        peaks = self.parse_input_spectrum()
+        if not peaks: return
+        t_mz = peaks[0][0]
+        min_mz, max_mz = self.get_tolerance_range(t_mz)
+        self.cursor.execute("SELECT name, formula, precursor_mz FROM compounds WHERE precursor_mz BETWEEN ? AND ?", (min_mz, max_mz))
+        def _update():
+            for i in self.tree.get_children(): self.tree.delete(i)
+            for row in self.cursor.fetchall(): 
+                self.tree.insert("", "end", values=("Local", "DB", row[0], row[1], row[2], "N/A", "Local", "N/A"))
+        self.safe_gui_call(_update)
+
+if __name__ == "__main__":
+    root = tk.Tk()
+    app = MassSpecApp(root)
+    root.mainloop()
