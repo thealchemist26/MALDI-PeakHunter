@@ -1,18 +1,234 @@
 # MALDI-PeakHunter
-MALDI PeakHunter is a Python-based desktop application designed for mass spectrometry researchers. It provides a lightweight, interactive interface for visualizing mass spectra, performing peak picking, and identifying compounds via the PubChem API or a local library.It is specifically tuned for MALDI (Matrix-Assisted Laser Desorption/Ionization) data analysis, supporting various instrument resolutions and common adduct calculations.
 
-🌟 Key FeaturesInteractive Visualization:
-Zoomable, clickable stem plots generated via Matplotlib embedded in Tkinter.
-Real-time Database Search:PubChem Integration: Automatically searches the NCBI PubChem database based on precursor mass.Local Library: SQLite-based local storage for custom compound libraries.
-Smart Filtering:Adduct Handling: Automatic calculation of neutral mass based on selected adducts (e.g., [M+H]+, [M+Na]+).
-Class Filtering: Filter results by chemical category (Lipids, Peptides, Metabolites, etc.).
-PPM Error Limits: Set strict mass accuracy thresholds.Structure Preview: Fetches and displays 2D chemical structures (PNG) directly from PubChem upon selecting a result.
-Data Export: Export identification results to .csv for further analysis.
-Non-Blocking UI: Uses threading for network requests to keep the GUI responsive during heavy data fetching.
+Version: 1.0
+Author: Rohith Krishna
+Dependencies: tkinter, numpy, matplotlib, sqlite3, requests, Pillow (PIL), csv, json, threading
 
-🛠 InstallationPrerequisites
-Python 3.8+Internet connection (for PubChem API)DependenciesInstall the required Python packages using pip:Bashpip install numpy matplotlib requests pillow
-Note: tkinter and sqlite3 are included in standard Python distributions. If you are on Linux, you may need to install python3-tk separately.Running the ApplicationBashpython main.py
-(Replace main.py with the actual name of your script file)📖 User Guide1. ConfigurationOn the left panel, configure your search parameters:Instrument: Select a preset (e.g., "MALDI MRT", "Synapt G2") to auto-set mass tolerance, or enter a custom tolerance.Adduct: Choose the ionization adduct (e.g., [M+H]+). This adjusts the search mass to find the neutral compound.Filters: Check boxes to prioritize specific chemical classes (e.g., "Lipids", "Drugs") or enforce a specific PPM error limit.2. Input DataPaste your peak list into the Input Spectrum text box.Format: m/z, intensity (one peak per line).Example:Plaintext411.22046, 10000
+Overview
+MALDI PeakHunter is a desktop GUI application for analyzing MALDI (Matrix-Assisted Laser Desorption/Ionization) mass spectrometry data. It enables researchers to:
+
+Load and visualize mass spectra interactively.
+
+Search compound masses in PubChem using their monoisotopic mass.
+
+Filter search results by chemical class (e.g., lipids, peptides, metabolites).
+
+Preview compound structures retrieved from PubChem.
+
+Maintain a local SQLite database for custom compound libraries.
+
+Export search results to .csv.
+
+The program combines scientific tools like NumPy and Matplotlib with an intuitive Tkinter GUI, making it ideal for both research labs and educational environments.
+
+Key Features
+Interactive stem plot of spectrum peaks.
+
+Automated PubChem compound mass search (with retry and timeout handling).
+
+Chemical class keyword filters.
+
+Automatic image retrieval and display of compound structures.
+
+Local SQLite storage and retrieval.
+
+Custom search tolerances and adduct adjustments.
+
+Multi-threaded networking to keep the UI responsive.
+
+Application Architecture
+The main code defines a single class:
+
+class MassSpecApp
+The core of the application, managing both logic and GUI layout.
+
+Initialization (__init__)
+
+Sets up the main Tkinter window and all interface components:
+
+Left panel: settings, filters, and controls.
+
+Right panel: matplotlib-based interactive plot, results table, and structure viewer.
+
+Status bar for progress updates.
+
+Initializes SQLite database and network session.
+
+Creates numpy arrays for spectrum data and handles threading-safe GUI updates.
+
+Function Reference
+Each function is documented below for developers extending or maintaining the code.
+
+Database Handling
+init_db()
+Initializes the SQLite database my_ms_library.db.
+Creates a table compounds if it doesn’t exist, containing columns:
+
+Column	Type	Description
+id	INTEGER	Primary key
+name	TEXT	Compound name
+formula	TEXT	Formula string
+precursor_mz	REAL	Observed precursor m/z
+collision_energy	TEXT	Collision energy text
+peaks_json	TEXT	Serialized JSON of peaks
+add_to_db_window()
+Spawns a small modal window allowing users to add a custom compound to the local library.
+Entries include name, formula, collision energy, and peaks. Data are stored in the SQLite table.
+
+search_local_db()
+Searches the local database for matching compounds within the user-defined tolerance around the selected precursor m/z.
+Displays results in the right-side treeview.
+
+Spectrum Management
+parse_input_spectrum()
+Parses user-provided text input containing m/z and intensity pairs, separated by commas, spaces, or tabs.
+Returns a list of tuples sorted by descending intensity.
+
+plot_spectrum()
+Generates an interactive stem plot of m/z peaks against intensities using Matplotlib.
+Automatically labels the top 20 visible peaks and refreshes on zoom/pan operations.
+
+update_visible_labels(ax)
+Updates visible m/z labels dynamically whenever the zoom level changes.
+
+on_peak_click(event)
+Triggered when the user clicks a specific data point on the plot.
+Automatically initiates a PubChem search for the selected peak’s m/z.
+
+PubChem Search Logic
+setup_network_session()
+Configures the requests.Session() with retry policies using urllib3.Retry.
+Prevents crashes from flaky network conditions.
+
+start_search_thread(override_mz=None)
+Spawns a background thread for PubChem search operations, preventing UI freezing.
+
+search_pubchem(override_mz, search_id)
+Main PubChem search logic:
+
+Calculates the neutral mass based on the selected adduct.
+
+Defines the search range (based on tolerance).
+
+Queries PubChem’s REST API for CIDs within that mass range.
+
+Passes CIDs to fetch_filter_rank() for detail retrieval and ranking.
+
+fetch_filter_rank(cids, theoretical_neutral, input_precursor, search_id)
+Given a CID list, retrieves molecular properties (title, formula, monoisotopic mass).
+Applies keyword-based class filters and ranks compounds by mass error (ppm).
+
+update_tree_gui(results, input_precursor)
+Populates result table with:
+
+Rank
+
+Source (PubChem or local DB)
+
+Compound name
+
+Formula
+
+Observed m/z
+
+Computed error
+
+Class match label
+
+Hidden CID column (used for structure fetching)
+
+get_tolerance_range(mass)
+Calculates the allowable window around the neutral mass based on tolerance settings (in Da or ppm).
+
+Structure Retrieval
+on_tree_select(event)
+Triggered when a user selects a row in the Treeview.
+If a PubChem compound is selected, begins asynchronous structure image fetching.
+
+fetch_structure_image(cid)
+Downloads a PNG image of the selected compound structure from PubChem.
+Updates the structure preview frame with the compound image.
+
+GUI Management and Helpers
+safe_gui_call(callback, *args)
+Executes a given callback safely within the Tkinter event loop (thread-safe).
+
+safe_msg(title, msg, icon="info")
+Displays a Tkinter message box in a thread-safe way with selection of icons (info/warning/error).
+
+update_status(msg)
+Updates the bottom status bar text through the GUI thread safely.
+
+export_csv()
+Exports the current results table to a .csv file.
+Includes headers and all compound data (both local and PubChem).
+
+apply_instrument_preset(event=None)
+Sets the tolerance based on the selected instrument preset (from INSTRUMENTS dictionary).
+
+on_close()
+Gracefully closes the application, ensuring all threads and the database connection are terminated.
+
+Configuration Reference
+Constant	Description
+PUBCHEM_URL	Base REST endpoint for PubChem monoisotopic mass search
+STRUCTURE_URL	Endpoint for retrieving structure PNG images by CID
+ADDUCTS	Common MS adducts and their mass adjustments
+INSTRUMENTS	Instrument-specific mass tolerance presets
+CLASS_KEYWORDS	Keyword sets for automatic class filtering of compounds
+Dependencies
+Make sure the following Python modules are installed:
+
+bash
+pip install numpy matplotlib pillow requests
+Optional (for packaging or advanced handling):
+
+bash
+pip install pyinstaller
+Running the Application
+From the command line:
+
+bash
+python maldi_peakhunter.py
+The main interface will open, allowing you to paste spectrum data and begin analysis.
+
+File Structure
+text
+maldi_peakhunter.py
+my_ms_library.db          # Automatically created SQLite database
+data/
+  └─ exported_results.csv # Example output (if exported)
+Example Input
+text
+411.22046, 10000
 611.09, 50000
-3. AnalysisClick Generate Plot to visualize the spectrum.Click on any peak stem in the plot to instantly trigger a PubChem search for that specific m/z.Alternatively, click Search Local DB to query your offline library.4. ResultsMatches appear in the table at the bottom.Click a row to view the chemical Structure on the bottom right.Click Export Results to save the table as a CSV file.💻 Code Documentation & ArchitectureThis section is for developers contributing to the project or modifying the source code.1. Global ConfigurationsThe script uses dictionaries at the top level to manage domain knowledge easily:ADDUCTS: Stores mass shifts for different ionization states.INSTRUMENTS: Maps instrument names to default mass tolerances (Da).CLASS_KEYWORDS: A keyword mapping used to tag results (e.g., detecting "cholest" string implies "Sterols").2. Class: MassSpecAppThe main controller class that inherits from the Tkinter root.A. GUI LayoutThe interface is divided into two main ttk.Frame panels:pan_left: Controls, Settings, and Text Input.pan_right: Matplotlib Canvas (Top) and Results/Image Viewer (Bottom).B. Threading & Network LogicTo prevent the GUI from freezing during API calls, the app uses the threading module.start_search_thread: Initiates a background thread. It generates a unique search_id (timestamp) to ensure that if the user clicks multiple peaks quickly, old search results don't overwrite newer ones (Race condition handling).safe_gui_call: A helper method using root.after(0, callback). This is crucial because Tkinter is not thread-safe; UI updates must happen on the main thread.C. Plotting EngineUses matplotlib.backends.backend_tkagg to embed plots.plot_spectrum: Parses text input and generates a Stem Plot.update_visible_labels: dynamic label generation. It listens to the plot's zoom event (xlim_changed) and only labels the "Top N" peaks currently visible in the view, preventing text clutter.D. API Interaction (requests)setup_network_session: Configures a requests.Session with urllib3 retry logic (backoff factor) to handle intermittent network failures gracefully.search_pubchem:Calculates Neutral Mass: $Mass_{neutral} = Mass_{observed} - Mass_{adduct}$.Fetches CIDs (Compound IDs) from PubChem within the defined tolerance range.Calls fetch_filter_rank to get details (Formula, Name) for the top 40 CIDs.fetch_structure_image: Downloads the 2D PNG representation of a molecule asynchronously.E. Data Processingparse_input_spectrum: robustly handles CSV-like text input, stripping whitespace and handling tabs/commas.fetch_filter_rank:Downloads compound metadata.Calculates PPM Error: $\frac{|Mass_{db} - Mass_{theoretical}|}{Mass_{db}} \times 10^6$.Performs string matching against CLASS_KEYWORDS to populate the "ClassMatch" column.🔮 Future Roadmap[ ] Implementation of MS/MS fragment matching.[ ] Batch processing mode (multiple files).[ ] Integration with LipidMaps API for specialized lipidomics.[ ] Dark Mode UI support.📄 LicenseThis project is open-source. Please refer to the LICENSE file for details.🤝 ContactMaintainer: [Your Name/Handle]Contact: academic_research@example.com
+760.585, 25000
+Example Workflow
+Launch the program.
+
+Paste spectrum peaks into the input field.
+
+Choose your instrument and adduct.
+
+Press Generate Plot to view the spectrum.
+
+Click on a peak to trigger an online PubChem mass search.
+
+Review candidate results in the table and see structural images.
+
+Optionally export results as .csv.
+
+Contributing
+When contributing:
+
+Ensure your code follows PEP8 style guidelines.
+
+Use descriptive docstrings for new methods.
+
+Test network and database operations for race conditions.
+
+Document any added compound classification keywords.
+
+License
+This project is for academic and research use only.
+Uses the PubChem PUG REST API under their public data terms.
