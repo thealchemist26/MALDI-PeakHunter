@@ -18,6 +18,26 @@ It bridges the gap between raw `m/z` data and chemical identification, offering 
 ) <br> *Interactive plotting and PubChem search* | ![Structure View](<img width="1915" height="1031" alt="image" src="https://github.com/user-attachments/assets/edf75d29-37bb-494d-a3c9-91c175ae1ad4" />
 ) <br> *Chemical structure preview and local DB* |
 
+## 📸 Screenshots
+
+### Interface & Plotting
+
+| **Main Spectrum View** | **Peak Selection & Zoom** |
+|:---:|:---:|
+| <img alt="Main Spectrum View" src="<img width="1284" height="523" alt="image" src="https://github.com/user-attachments/assets/0645aad6-4120-408b-8e61-a67edd3768b1" />
+" width="100%"> | <img alt="Peak Selection" src="<img width="1284" height="523" alt="image" src="<img width="1059" height="1001" alt="image" src="https://github.com/user-attachments/assets/6a54b06c-24a5-49fa-beb2-355977d05ffd" />
+" />
+" width="100%"> |
+| *Overview of the main window with a plotted spectrum.* | *Zooming in and selecting a specific peak for analysis.* |
+
+### Database & Results
+
+| **PubChem Search Results** | **Local Database Manager** |
+|:---:|:---:|
+| <img alt="PubChem Results" src="<img width="1910" height="1031" alt="image" src="https://github.com/user-attachments/assets/106aa636-f6ba-473f-b28e-f2517e5cc520" />
+" width="100%"> | <img alt="Database Manager" src="<img width="1212" height="572" alt="image" src="https://github.com/user-attachments/assets/a41cf317-8bbf-448c-b56c-a1a9a95d1219" />
+" width="100%"> |
+| *Viewing search results and corresponding chemical structure.* | *Managing the local SQLite compound library.* |
 
 ---
 
