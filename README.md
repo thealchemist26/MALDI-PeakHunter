@@ -12,7 +12,7 @@ It bridges the gap between raw `m/z` data and chemical identification, offering 
 
 ## 📸 Screenshots
 
-| **Main Interface** | **Database Search** |
+| **Main Interface** | **Structure View** |
 |:---:|:---:|
 | ![Main Interface](<img width="1916" height="1023" alt="image" src="https://github.com/user-attachments/assets/616cae72-c82a-4551-a87b-ccad8d9d2e9b" />
 ) <br> *Interactive plotting and PubChem search* | ![Structure View](<img width="1915" height="1031" alt="image" src="https://github.com/user-attachments/assets/edf75d29-37bb-494d-a3c9-91c175ae1ad4" />
